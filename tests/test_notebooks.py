@@ -15,6 +15,9 @@ class NotebookTests(TestCase):
         expected_outputs = {
             "laptop_prompt_study.ipynb": "predicted market share",
             "laptop_propose_critic.ipynb": "Critic: Approved",
+            "peanut_sheller_brainstorm.ipynb": "Saved peanut_concept.json",
+            "peanut_sheller_propose_critic.ipynb": "Critic: Approved",
+            "planar_truss_react.ipynb": "Reported design:",
         }
         self.assertEqual(
             {path.name for path in NOTEBOOK_DIR.glob("*.ipynb")},

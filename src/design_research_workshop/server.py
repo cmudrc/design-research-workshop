@@ -15,6 +15,22 @@ from design_research.agents import OpenAICompatibleHTTPLLMClient
 
 from .critique import CRITIC, PROPOSER, critique, propose
 from .laptop import LaptopPolicy
+from .peanut import (
+    BRAINSTORM_SYSTEM,
+    PEANUT_CRITIC,
+    PEANUT_PROPOSER,
+    brainstorm,
+    critique_sheller,
+    propose_sheller,
+)
+from .truss import TRUSS_SYSTEM, truss_action
+
+RULES = {
+    BRAINSTORM_SYSTEM: brainstorm,
+    PEANUT_CRITIC: critique_sheller,
+    PEANUT_PROPOSER: propose_sheller,
+    TRUSS_SYSTEM: truss_action,
+}
 
 MODEL = "workshop-laptop-proxy-v0"
 MAX_REQUEST_BYTES = 65_536
@@ -36,6 +52,9 @@ def _complete(
     system_prompts = [
         message["content"] for message in messages if message["role"] == "system"
     ]
+    for system in system_prompts:
+        if isinstance(system, str) and system in RULES:
+            return RULES[system](prompt)
     if PROPOSER in system_prompts:
         return dict(propose(policy, prompt))
     if CRITIC in system_prompts:
@@ -106,7 +125,13 @@ class WorkshopHandler(BaseHTTPRequestHandler):
                 )
             messages = request["messages"]
             response = _complete(self.server.policy, messages)
-        except (AttributeError, KeyError, TypeError, ValueError) as error:
+        except (
+            AttributeError,
+            KeyError,
+            StopIteration,
+            TypeError,
+            ValueError,
+        ) as error:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": {"message": str(error)}})
             return
 
