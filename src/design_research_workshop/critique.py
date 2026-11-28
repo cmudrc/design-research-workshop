@@ -58,5 +58,5 @@ def critique(policy: LaptopPolicy, prompt: str) -> dict[str, object]:
 def _split_prompt(prompt: str, separator: str) -> tuple[str, str]:
     task, marker, remainder = prompt.removeprefix(TASK_HEADER).partition(separator)
     if not prompt.startswith(TASK_HEADER) or not marker:
-        raise ValueError("Use the workshop laptop propose–critic prompt templates.")
+        raise ValueError("Use the workshop proposer or critic prompt template.")
     return task, remainder
