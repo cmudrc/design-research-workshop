@@ -15,7 +15,7 @@ class NotebookTests(TestCase):
         expected_outputs = {
             "laptop_prompt_study.ipynb": "predicted market share",
             "laptop_propose_critic.ipynb": "Critic: Approved",
-            "peanut_sheller_brainstorm.ipynb": "Saved peanut_concept.json",
+            "one_handed_jar_brainstorm.ipynb": "Mechanism coverage",
             "peanut_sheller_propose_critic.ipynb": "Critic: Approved",
             "planar_truss_react.ipynb": "Reported design:",
         }

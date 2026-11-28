@@ -13,59 +13,19 @@ from uuid import uuid4
 
 from design_research.agents import OpenAICompatibleHTTPLLMClient
 
-from .critique import CRITIC, PROPOSER, critique, propose
-from .laptop import LaptopPolicy
-from .peanut import (
-    BRAINSTORM_SYSTEM,
-    PEANUT_CRITIC,
-    PEANUT_PROPOSER,
-    brainstorm,
-    critique_sheller,
-    propose_sheller,
-)
-from .truss import TRUSS_SYSTEM, truss_action
+from .bot import WorkshopPyBot
 
-RULES = {
-    BRAINSTORM_SYSTEM: brainstorm,
-    PEANUT_CRITIC: critique_sheller,
-    PEANUT_PROPOSER: propose_sheller,
-    TRUSS_SYSTEM: truss_action,
-}
-
-MODEL = "workshop-laptop-proxy-v0"
+MODEL = "workshop-pybot-v1"
+LEGACY_MODEL = "workshop-laptop-proxy-v0"
 MAX_REQUEST_BYTES = 65_536
 
 
-def _complete(
-    policy: LaptopPolicy, messages: list[dict[str, object]]
-) -> dict[str, object]:
-    prompt = next(
-        (
-            message["content"]
-            for message in reversed(messages)
-            if message["role"] == "user"
-        ),
-        None,
-    )
-    if not isinstance(prompt, str):
-        raise ValueError("Include a user message with text content.")
-    system_prompts = [
-        message["content"] for message in messages if message["role"] == "system"
-    ]
-    for system in system_prompts:
-        if isinstance(system, str) and system in RULES:
-            return RULES[system](prompt)
-    if PROPOSER in system_prompts:
-        return dict(propose(policy, prompt))
-    if CRITIC in system_prompts:
-        return critique(policy, prompt)
-    return dict(policy.complete(prompt))
-
-
 @contextmanager
-def workshop_client() -> Iterator[OpenAICompatibleHTTPLLMClient]:
+def workshop_client(
+    bot: WorkshopPyBot | None = None,
+) -> Iterator[OpenAICompatibleHTTPLLMClient]:
     """Start a loopback endpoint on an available port for one demo."""
-    with WorkshopServer(0) as server:
+    with WorkshopServer(0, bot=bot) as server:
         thread = Thread(
             target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
         )
@@ -75,6 +35,7 @@ def workshop_client() -> Iterator[OpenAICompatibleHTTPLLMClient]:
                 name="workshop-rule-based",
                 base_url=f"http://127.0.0.1:{server.server_port}/v1",
                 default_model=MODEL,
+                model_patterns=(MODEL, LEGACY_MODEL),
                 api_key_env="DESIGN_RESEARCH_WORKSHOP_PROXY_UNUSED_KEY",
                 max_retries=0,
             ) as client:
@@ -85,8 +46,8 @@ def workshop_client() -> Iterator[OpenAICompatibleHTTPLLMClient]:
 
 
 class WorkshopServer(ThreadingHTTPServer):
-    def __init__(self, port: int) -> None:
-        self.policy = LaptopPolicy()
+    def __init__(self, port: int, *, bot: WorkshopPyBot | None = None) -> None:
+        self.bot = bot if bot is not None else WorkshopPyBot()
         super().__init__(("127.0.0.1", port), WorkshopHandler)
 
 
@@ -104,6 +65,26 @@ class WorkshopHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_GET(self) -> None:
+        if self.path == "/v1/models":
+            self.send_json(
+                HTTPStatus.OK,
+                {
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": MODEL,
+                            "object": "model",
+                            "owned_by": "design-research-workshop",
+                        }
+                    ],
+                },
+            )
+        else:
+            self.send_json(
+                HTTPStatus.NOT_FOUND, {"error": {"message": "Unknown endpoint."}}
+            )
+
     def do_POST(self) -> None:
         if self.path != "/v1/chat/completions":
             self.send_json(
@@ -116,7 +97,7 @@ class WorkshopHandler(BaseHTTPRequestHandler):
                 raise ValueError("Missing or oversized request body.")
             request = json.loads(self.rfile.read(length))
             if (
-                request["model"] != MODEL
+                request["model"] not in (MODEL, LEGACY_MODEL)
                 or request.get("stream")
                 or request.get("tools")
             ):
@@ -124,7 +105,23 @@ class WorkshopHandler(BaseHTTPRequestHandler):
                     "Use the workshop model with a non-streaming text request."
                 )
             messages = request["messages"]
-            response = _complete(self.server.policy, messages)
+            reply = self.server.bot.complete(messages)
+            if not reply.matched and request["model"] == LEGACY_MODEL:
+                self.send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {
+                        "error": {
+                            "message": reply.content["question"],
+                            **reply.content,
+                        },
+                        "workshop": {
+                            "reason": reply.reason,
+                            "candidates": reply.candidates,
+                        },
+                    },
+                )
+                return
+            content = json.dumps(reply.content, allow_nan=False)
         except (
             AttributeError,
             KeyError,
@@ -140,13 +137,18 @@ class WorkshopHandler(BaseHTTPRequestHandler):
             {
                 "id": f"chatcmpl-{uuid4().hex}",
                 "object": "chat.completion",
-                "model": MODEL,
+                "model": request["model"],
+                "workshop": {
+                    "rule": reply.rule,
+                    "reason": reply.reason,
+                    "candidates": reply.candidates,
+                },
                 "choices": [
                     {
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": json.dumps(response),
+                            "content": content,
                         },
                         "finish_reason": "stop",
                     }
