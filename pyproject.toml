@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "design-research-workshop"
-version = "0.2.0.dev1"
+version = "0.2.0.dev2"
 description = "Reproducible workshop demos for the Design Research Collective Python ecosystem"
 readme = "README.md"
 requires-python = ">=3.12"

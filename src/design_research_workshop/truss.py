@@ -7,7 +7,7 @@ import math
 import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from itertools import combinations
 
 from design_research.agents import (
@@ -56,7 +56,8 @@ _UNSUPPORTED = re.compile(
 # matches. The workshop varies member connectivity on a fixed analysis model.
 _FIXED_FEATURE = (
     r"loads?|loading|forces?|materials?|stock|sections?|cross sections?|geometry|"
-    r"joints?|supports?|span|height|length|angles?|coordinates|diameters?|thickness"
+    r"joints?|supports?|members?|bars?|chords?|braces?|diagonals?|struts?|span|height|length|"
+    r"angles?|coordinates|diameters?|thickness"
 )
 _UNMODELED = re.compile(
     rf"\b(?:{_FIXED_FEATURE}|lateral|horizontal|wind|seismic|thermal|impact|"
@@ -339,12 +340,25 @@ def truss_agent(
         )
 
 
-def _no_design(brief: TrussBrief, current: set[tuple]) -> dict:
-    return {
+def _no_design(brief: TrussBrief, current: set[tuple], layouts: list[dict]) -> dict:
+    """Report what the fixed-joint search can achieve when each bound is relaxed."""
+    result = {
         "status": "no feasible completion",
         **asdict(brief),
         "members": sorted(current),
     }
+    if brief.max_mass_kg is not None:
+        safety_first = replace(
+            brief, objective=SAFETY, min_fos=1.0, strict_fos_floor=False
+        )
+        best = safety_first.select(layouts, current)
+        result["best_fos_within_mass_limit"] = (
+            best["factor_of_safety"] if best else None
+        )
+    mass_first = replace(brief, objective=MASS, max_mass_kg=None, strict_mass_cap=False)
+    best = mass_first.select(layouts, current)
+    result["least_mass_kg_meeting_fos_floor"] = best["mass_kg"] if best else None
+    return result
 
 
 def truss_reply(prompt: str, *, previous: Mapping | None = None) -> dict:
@@ -376,7 +390,11 @@ def truss_reply(prompt: str, *, previous: Mapping | None = None) -> dict:
         "applied_vertical_load_n": design.state.load_vector[1],
         "evaluated": analysis["evaluated"],
         "feasible_layouts": len(analysis["feasible_layouts"]),
-        **(choice if choice is not None else _no_design(brief, set())),
+        **(
+            choice
+            if choice is not None
+            else _no_design(brief, set(), analysis["feasible_layouts"])
+        ),
     }
 
 
@@ -439,16 +457,16 @@ def truss_action(prompt: str) -> dict[str, object]:
         return _action(
             COMPARE, {}, "Ask the structural solver to evaluate possible completions."
         )
-    if len(states) == 2 and attempted is not None:
-        return _add_action(
-            attempted, "Try the first joint pair proposed in the design brief."
-        )
     choice = brief.select(analysis["feasible_layouts"], current)
     if choice is None:
         return _action(
             "final_answer",
-            _no_design(brief, current),
+            _no_design(brief, current, analysis["feasible_layouts"]),
             "No analyzed completion satisfies the brief and the existing geometry.",
+        )
+    if len(states) == 2 and attempted is not None:
+        return _add_action(
+            attempted, "Try the first joint pair proposed in the design brief."
         )
     missing = {tuple(edge) for edge in choice["members"]} - current
     if available := missing & legal:

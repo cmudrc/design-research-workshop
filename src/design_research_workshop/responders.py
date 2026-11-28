@@ -16,6 +16,7 @@ from .critique import (
     critique,
     propose,
 )
+from .evidence import brainstorm_evidence, sheller_evidence, truss_evidence
 from .functions_catalog import infer_functions
 from .laptop import CHOOSE, LAPTOP_TASK, LaptopPolicy
 
@@ -77,7 +78,30 @@ def _chart_edit(prompt: str) -> bool:
         return not any(
             _ideation(line) for line in prompt.splitlines() if "|" not in line
         )
+    if (
+        infer_functions(prompt)
+        and not _ideation(prompt)
+        and not _new_design.search(prompt)
+    ):
+        return True
     return _brainstorm_edit(prompt)
+
+
+def _brainstorm_result(brief: DesignBrief, turn: Turn, prompt: str) -> Content:
+    previous = []
+    if brainstorm.wants_more(turn.prompt):
+        for message in turn.history:
+            if message["role"] != "assistant":
+                continue
+            try:
+                result = json.loads(message["content"])
+            except ValueError:
+                continue
+            if isinstance(result, dict) and result.get("brief") == brief.title:
+                rows = result.get("concepts")
+                if isinstance(rows, list):
+                    previous.extend(row for row in rows if isinstance(row, dict))
+    return generate_concepts(brief, prompt, previous=previous)
 
 
 def brainstorm_rule(brief: DesignBrief, *, name: str, topics: tuple[str, ...]) -> Rule:
@@ -86,8 +110,9 @@ def brainstorm_rule(brief: DesignBrief, *, name: str, topics: tuple[str, ...]) -
         name,
         brief.statement,
         topics,
-        lambda turn: generate_concepts(brief, turn.user_text),
+        lambda turn: _brainstorm_result(brief, turn, turn.user_text),
         follow_up=_brainstorm_edit,
+        explain=brainstorm_evidence,
     )
 
 
@@ -136,7 +161,9 @@ def _open_brainstorm(turn: Turn) -> Content:
     brief = DesignBrief(
         title or "Your design brief", title or "Combine the supplied options.", chart
     )
-    result = generate_concepts(brief, "\n".join(controls) or "Generate concepts.")
+    result = _brainstorm_result(
+        brief, turn, "\n".join(controls) or "Generate concepts."
+    )
     result["chart"] = {
         name: {"options": options, **sources[name]} for name, options in chart.items()
     }
@@ -222,9 +249,12 @@ def workshop_rules() -> tuple[Rule, ...]:
                 "lidded container opening",
                 "one handed container opener",
             ),
-            lambda turn: brainstorm.respond(turn.user_text),
+            lambda turn: _brainstorm_result(
+                brainstorm.JAR_OPENER, turn, turn.user_text
+            ),
             systems=(brainstorm.BRAINSTORM_SYSTEM,),
             follow_up=_brainstorm_edit,
+            explain=brainstorm_evidence,
         ),
         Rule(
             "peanut-sheller",
@@ -239,6 +269,7 @@ def workshop_rules() -> tuple[Rule, ...]:
                 "groundnut shellers",
             ),
             _peanut,
+            explain=sheller_evidence,
             systems=(
                 peanut.PEANUT_PROPOSER,
                 peanut.PEANUT_CRITIC,
@@ -254,10 +285,11 @@ def workshop_rules() -> tuple[Rule, ...]:
             "Choose a truss topology for a structural objective.",
             ("truss", "trusses"),
             _truss,
+            explain=truss_evidence,
             systems=(truss.TRUSS_SYSTEM,),
             protocol=_truss_protocol,
             follow_up=_matches(
-                r"\b(lightest|lighter|weight|safest|safer|stiffest|stiffer|stiffness|deflection|mass|factor of safety|safety factor|fos|cap it|limit it|\d+(?:\.\d+)?\s*kg)\b"
+                r"\b(lightest|lighter|weight|safest|safer|stiffest|stiffer|stiffness|deflection|displacement|mass|safety margin|factor of safety|safety factor|fos|cap it|limit it|\d+(?:\.\d+)?\s*kg)\b"
             ),
         ),
         Rule(
@@ -299,5 +331,6 @@ def workshop_rules() -> tuple[Rule, ...]:
                 )
             ),
             follow_up=_chart_edit,
+            explain=brainstorm_evidence,
         ),
     )

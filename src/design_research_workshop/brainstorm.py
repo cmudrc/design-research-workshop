@@ -121,14 +121,17 @@ _COUNTS.update(
     {f"twenty-{name}": 20 + i for i, name in enumerate(_NUMBER_WORDS[1:5], 1)}
 )
 _COUNTS["dozen"] = 12
+_COUNTS["another"] = 1
 _NUMBER = r"-?\d+|" + "|".join(
     word.replace("-", "[ -]") for word in sorted(_COUNTS, key=len, reverse=True)
 )
 _COUNT = re.compile(
     rf"(?:\b(?:concept|idea)\s+count\s*[:=]\s*(?P<label>{_NUMBER})(?![\w-]|\.\d)"
-    rf"|(?<![\w.-])(?P<noun>{_NUMBER})\s+(?:(?:distinct|different|complete|new|more)\s+)*"
+    rf"|(?<![\w.-])(?P<noun>{_NUMBER})\s+(?:(?:distinct|different|complete|new|more|additional|further|other)\s+)*"
     rf"(?:ideas?|concepts?|designs?|solutions?|options?|ways?|alternatives?)\b"
-    rf"|\b(?:give me|show me|list|brainstorm|suggest|generate|make it|try|"
+    rf"|(?<![\w.-])(?P<extra>{_NUMBER})\s+more\b"
+    rf"|\b(?P<single>another)\s+one\b"
+    rf"|\b(?:give me|show me|(?:can|could) I (?:see|have|get)|list|brainstorm|suggest|generate|make it|try|"
     rf"(?:narrow|reduce|cut|limit) (?:it|that|these|them|the list)(?: down)? to)\s+"
     rf"(?P<verb>{_NUMBER})(?![\w-]|\.\d))",
     re.IGNORECASE,
@@ -152,10 +155,23 @@ _CHOICE_VERB = re.compile(
 )
 
 
+_MORE = re.compile(
+    rf"\b(?:(?:more|additional|other|further|new|another)\s+(?:(?:distinct|design)\s+)?"
+    rf"(?:ideas?|concepts?|alternatives?|solutions?|options?)|(?:{_NUMBER})\s+more\b|another one|what else)\b",
+    re.I,
+)
+
+
+def wants_more(prompt: str) -> bool:
+    """Recognize a request for additional concepts, distinct from a request for more variety."""
+    return bool(_MORE.search(prompt))
+
+
 def is_follow_up(prompt: str) -> bool:
     """Recognize a count, seed, framing, or mechanism control for a previous brief."""
     return any(
-        pattern.search(prompt) for pattern in (_COUNT, _SEED, _STRATEGY, _CHOICE_VERB)
+        pattern.search(prompt)
+        for pattern in (_COUNT, _SEED, _STRATEGY, _CHOICE_VERB, _MORE)
     )
 
 
@@ -255,12 +271,15 @@ def generate_concepts(
     *,
     count: int | None = None,
     seed: int | None = None,
+    previous: Sequence[Mapping[str, str]] = (),
 ) -> dict:
     """Select unique combinations and report how each changes mechanism coverage.
 
     Direct framing uses the sum of the catalog positions. Function-first framing
     picks the most unused options, then the least repeated options. Both resolve
-    remaining ties using catalog preference and a seeded shuffle.
+    remaining ties using catalog preference and a seeded shuffle. Pass previous
+    concept rows for an additional batch. Matching rows are excluded and their
+    mechanisms count toward coverage. Rows outside the current chart are ignored.
     """
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("Give the bot a brainstorming prompt.")
@@ -271,11 +290,35 @@ def generate_concepts(
             f"Use a chart with at most {MAX_COMBINATIONS} combinations per request."
         )
 
+    shown = {
+        tuple(brief.functions[name].index(row[name]) for name in chart)
+        for row in previous
+        if isinstance(row, Mapping)
+        and row.keys() == chart.keys()
+        and all(row[name] in options for name, options in chart.items())
+    }
+    remaining = available - len(shown)
+    if not remaining:
+        raise ValueError(
+            f"All {available} combinations in this chart have already been shown."
+        )
     if count is None:
-        count = _count_from_prompt(prompt)
+        # An unnumbered “more ideas” turn requests another batch of the remaining choices.
+        count_prompt = prompt
+        if previous:
+            lines = prompt.splitlines()
+            for i in reversed(range(len(lines))):
+                if wants_more(lines[i]):
+                    count_prompt = "\n".join(lines[i:])
+                    break
+        count = _count_from_prompt(count_prompt)
     if count is None:
-        count = min(6, available)
-    limit = min(available, MAX_CONCEPTS)
+        count = min(6, remaining)
+    limit = min(remaining, MAX_CONCEPTS)
+    if shown and type(count) is int and count > remaining:
+        raise ValueError(
+            f"Only {remaining} additional combinations remain in this chart."
+        )
     if type(count) is not int or not 1 <= count <= limit:
         raise ValueError(
             f"Request 1 to {limit} ideas for this chart and its fixed options."
@@ -309,7 +352,8 @@ def generate_concepts(
     ]
     Random(seed).shuffle(ranked)
     ranked.sort(key=sum)
-    uses = Counter()
+    ranked = [choice for choice in ranked if choice not in shown]
+    uses = Counter(item for choice in shown for item in enumerate(choice))
 
     def novelty_key(combo: tuple[int, ...]) -> tuple[int, int]:
         hits = [uses[item] for item in enumerate(combo)]
@@ -348,14 +392,16 @@ def generate_concepts(
         "concepts": concepts,
         "trace": trace,
     }
+    if shown:
+        result["previously_shown"] = len(shown)
     if brief.problem_id is not None:
         result["problem_id"] = brief.problem_id
     return result
 
 
-def respond(prompt: str) -> dict:
+def respond(prompt: str, *, previous: Sequence[Mapping[str, str]] = ()) -> dict:
     """Run the built-in one-handed jar-opener chart."""
-    return generate_concepts(JAR_OPENER, prompt)
+    return generate_concepts(JAR_OPENER, prompt, previous=previous)
 
 
 def run_brainstorm(

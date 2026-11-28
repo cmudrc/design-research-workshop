@@ -65,6 +65,7 @@ class TrussRuleTests(TestCase):
             "Maximize the safety factor with an additional support.",
             "Choose the lightest truss with thicker sections.",
             "Design a lightweight symmetric truss.",
+            "Design the lightest truss without a bottom chord.",
             "Minimize mass while also maximizing the number of paint colors.",
             "lightest truss with a -60 kg budget",
             "minimize safety factor",
@@ -123,6 +124,40 @@ class TrussRuleTests(TestCase):
             sorted(design.inspect({})["members"]), result.final_output["members"]
         )
         self.assertAlmostEqual(checked.fos, result.final_output["factor_of_safety"])
+
+    def test_conflicting_bounds_stop_before_editing_and_report_best_attainable_values(
+        self,
+    ):
+        design = TrussDesign(center_joint=True)
+        task = {
+            "brief": "Find the stiffest truss under 60 kg with a minimum safety factor of 2.2.",
+            "try_first": [0, 1],
+        }
+        with workshop_client() as client, truss_agent(client, design) as agent:
+            result = agent.run(json.dumps(task))
+        self.assertTrue(result.success, result.error)
+        self.assertEqual([t.tool_name for t in result.tool_results], [INSPECT, COMPARE])
+        self.assertEqual(design.state.members, ())
+        report = result.final_output
+        self.assertEqual(report["status"], "no feasible completion")
+        layouts = result.tool_results[1].result["feasible_layouts"]
+        affordable = [c["factor_of_safety"] for c in layouts if c["mass_kg"] < 60]
+        strong_enough = [c["mass_kg"] for c in layouts if c["factor_of_safety"] >= 2.2]
+        self.assertEqual(report["best_fos_within_mass_limit"], max(affordable))
+        self.assertEqual(report["least_mass_kg_meeting_fos_floor"], min(strong_enough))
+        self.assertLess(max(affordable), 2.2)
+        self.assertGreater(min(strong_enough), 60)
+        impossible = truss_reply(
+            "Find the lightest truss under 20 kg with a safety factor of at least 3."
+        )
+        self.assertIsNone(impossible["best_fos_within_mass_limit"])
+        self.assertIsNone(impossible["least_mass_kg_meeting_fos_floor"])
+        too_light = truss_reply("Find the safest truss under 20 kg.")
+        self.assertIsNone(too_light["best_fos_within_mass_limit"])
+        self.assertEqual(
+            too_light["least_mass_kg_meeting_fos_floor"],
+            min(c["mass_kg"] for c in layouts),
+        )
 
     def test_existing_edits_change_the_best_available_completion(self):
         design = TrussDesign(center_joint=True)

@@ -4,7 +4,7 @@ import json
 from dataclasses import asdict, replace
 from unittest import TestCase
 
-from design_research_workshop import workshop_client
+from design_research_workshop import WorkshopPyBot, workshop_client
 from design_research_workshop.peanut import (
     CLEANING,
     DEFAULT_CONCEPT,
@@ -149,6 +149,42 @@ class ShellerRuleTests(TestCase):
         )
         self.assertEqual(same, press)
 
+    def test_chat_preserves_handwritten_evidence_in_reviews_and_unrelated_revisions(
+        self,
+    ):
+        panel = "A hinged side panel exposes the separator and its collection tray."
+        for note in [f"Cleaning access: {panel}", panel]:
+            with self.subTest(note=note):
+                chat = WorkshopPyBot().session()
+                seed = chat.reply(
+                    f"Propose a peanut sheller with rollers and a sieve. {note}"
+                ).content
+                self.assertEqual(seed["cleaning_access"], panel)
+                first = chat.reply("Review it, especially cleanout.").content
+                self.assertEqual(
+                    first["evidence_status"]["Cleaning access"], "unrecognized"
+                )
+                self.assertIn("Cleaning access:", first["evidence_input"])
+                second = chat.reply("Review it for kernel protection only.").content
+                self.assertEqual(second["concept"]["cleaning_access"], panel)
+                revised = chat.reply("Revise it.").content
+                self.assertEqual(revised["cleaning_access"], panel)
+                self.assertEqual(
+                    revised["kernel_protection"], PROTECTIONS[revised["crack"]]
+                )
+                done = chat.reply(
+                    "Review it. Cleaning access: removable sieve and tray"
+                ).content
+                self.assertTrue(done["approved"])
+        seed = respond_sheller(
+            "Propose a peanut sheller.\nKernel protection: a novel pod cradle\nFeed control: a pocket drum",
+            role="propose",
+        )
+        self.assertEqual(
+            (seed["kernel_protection"], seed["feed_control"]),
+            ("a novel pod cradle", "a pocket drum"),
+        )
+
     def test_an_exclusion_replaces_an_excluded_mechanism_and_resets_its_specific_provision(
         self,
     ):
@@ -210,7 +246,56 @@ class ShellerRuleTests(TestCase):
                 sheller_task(seed, criteria=("kernel protection",))
             )
         self.assertFalse(outcome.approved)
-        self.assertIn("limit compression", outcome.critique_iterations[0]["feedback"])
+        self.assertIn("human reviewer", outcome.critique_iterations[0]["feedback"])
+        self.assertIn("unrecognized", outcome.critique_iterations[0]["feedback"])
+
+    def test_handwritten_evidence_reports_accepted_missing_and_unrecognized(self):
+        seed = replace(
+            DEFAULT_CONCEPT,
+            kernel_protection="Our prototype has an adjustable roller gap!",
+            cleaning_access="A hinged side panel exposes the separator and its collection tray.",
+        )
+        review = respond_sheller(
+            "Review its feed control and cleaning access.",
+            role="critic",
+            previous=asdict(seed),
+        )
+        self.assertEqual(
+            review["evidence_status"],
+            {
+                "Kernel protection": "accepted",
+                "Cleaning access": "unrecognized",
+                "Feed control": "missing",
+            },
+        )
+        self.assertFalse(review["approved"])
+        with workshop_client() as client:
+            capped = sheller_pattern(client, max_iterations=1).run(
+                sheller_task(
+                    seed,
+                    criteria=("kernel protection", "cleaning access", "feed control"),
+                    changes_per_revision=1,
+                )
+            )
+        last = capped.critique_iterations[-1]
+        self.assertEqual(capped.terminated_reason, "max_iterations_reached")
+        self.assertEqual(json.loads(last["proposal"]), asdict(seed))
+        self.assertTrue(
+            any(
+                goal.startswith("Change cleaning access:")
+                for goal in last["revision_goals"]
+            )
+        )
+        self.assertIn("Feed control is missing.", last["feedback"])
+        wish = replace(
+            seed, kernel_protection="Our prototype needs an adjustable roller gap."
+        )
+        review = respond_sheller(
+            "Review kernel protection only.", role="critic", previous=asdict(wish)
+        )
+        self.assertEqual(
+            review["evidence_status"], {"Kernel protection": "unrecognized"}
+        )
 
     def test_alternate_evidence_phrasing_and_a_contraction_in_a_correction(self):
         review = respond_sheller(

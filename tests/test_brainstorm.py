@@ -184,3 +184,54 @@ class BrainstormTests(TestCase):
         for invalid in ("ideation_not_in_the_catalog", "planar_truss_span"):
             with self.subTest(problem_id=invalid), self.assertRaises(ValueError):
                 DesignBrief.from_problem(invalid, options)
+
+    def test_change_framing_and_count_in_one_natural_follow_up(self):
+        text = "Brainstorm four concepts.\nCan I see three by function instead?"
+        reply = generate_concepts(JAR_OPENER, text)
+        self.assertEqual(reply["strategy"], "function-first")
+        self.assertEqual(len(reply["concepts"]), 3)
+
+    def test_additional_batches_cover_new_mechanisms_and_respect_remaining_budget(self):
+        from design_research_workshop.brainstorm import wants_more
+
+        brief = DesignBrief(
+            "Panel support",
+            "Support a panel.",
+            {
+                "Set angle": ["Wedge", "Pin", "Stay"],
+                "Support edge": ["Clip", "Cradle"],
+            },
+        )
+        prompt = "Give me one idea by function."
+        first = generate_concepts(brief, prompt)["concepts"]
+        next_two = generate_concepts(
+            brief, prompt + "\nTwo more, please.", previous=first
+        )
+        self.assertEqual(len(next_two["concepts"]), 2)
+        self.assertEqual(next_two["previously_shown"], 1)
+        self.assertEqual(
+            next_two["trace"][0]["new_functions"], ["Set angle", "Support edge"]
+        )
+        self.assertNotIn(first[0], next_two["concepts"])
+        shown = first + next_two["concepts"]
+        # Duplicate and out-of-chart records do not consume remaining capacity.
+        old = shown + first + [{"Set angle": "Missing", "Support edge": "Clip"}]
+        last = generate_concepts(brief, prompt + "\nMore ideas, please.", previous=old)
+        self.assertEqual(last["previously_shown"], 3)
+        self.assertEqual(len(last["concepts"]), 3)
+        self.assertFalse(any(c in shown for c in last["concepts"]))
+        with self.assertRaisesRegex(ValueError, "Only 3 additional"):
+            generate_concepts(brief, "I want four additional concepts.", previous=shown)
+        with self.assertRaisesRegex(ValueError, "All 6"):
+            generate_concepts(brief, "Another idea?", previous=shown + last["concepts"])
+        self.assertTrue(wants_more("What else?"))
+        self.assertTrue(wants_more("Another one, please."))
+        self.assertEqual(
+            len(
+                generate_concepts(brief, "Another one, please.", previous=first)[
+                    "concepts"
+                ]
+            ),
+            1,
+        )
+        self.assertFalse(wants_more("Try more variety."))

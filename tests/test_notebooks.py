@@ -13,11 +13,23 @@ NOTEBOOK_DIR = Path(__file__).resolve().parents[1] / "notebooks"
 class NotebookTests(TestCase):
     def test_notebooks_execute(self) -> None:
         expected_outputs = {
-            "laptop_prompt_study.ipynb": "predicted market share",
-            "laptop_propose_critic.ipynb": "Critic: Approved",
-            "one_handed_jar_brainstorm.ipynb": "Mechanism coverage",
-            "peanut_sheller_propose_critic.ipynb": "Critic: Approved",
-            "planar_truss_react.ipynb": "Reported design:",
+            "laptop_prompt_study.ipynb": ("predicted market share",),
+            "laptop_propose_critic.ipynb": ("Critic: Approved",),
+            "one_handed_jar_brainstorm.ipynb": (
+                "Mechanism coverage",
+                "4 of 4 concepts match the allowed options",
+            ),
+            "peanut_sheller_propose_critic.ipynb": (
+                "Cleaning access [unrecognized]",
+                "Critic: Approved",
+                "Next change, still unapplied",
+            ),
+            "planar_truss_react.ipynb": (
+                "Reported design:",
+                "The runs installed the same members.",
+                "no feasible completion",
+                "Lightest layout meeting the safety floor: 70.89 kg",
+            ),
         }
         self.assertEqual(
             {path.name for path in NOTEBOOK_DIR.glob("*.ipynb")},
@@ -38,4 +50,5 @@ class NotebookTests(TestCase):
                     for cell in notebook.cells
                     for item in cell.get("outputs", [])
                 )
-                self.assertIn(expected, output)
+                for item in expected:
+                    self.assertIn(item, output)

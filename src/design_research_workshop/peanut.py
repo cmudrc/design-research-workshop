@@ -85,6 +85,13 @@ KERNEL = ProvisionCriterion(
         ),
         "Sliding rub plates": ("adjustable plate spacing", "adjustable plate gap"),
     },
+    (
+        FIXED_PROTECTION,
+        "fixed gap",
+        "fixed roller gap",
+        "fixed clearance",
+        "fixed stop",
+    ),
 )
 WASH = ProvisionCriterion(
     "Cleaning access",
@@ -105,6 +112,12 @@ WASH = ProvisionCriterion(
         ),
         "Hand-cranked air separator": ("removable chute and tray",),
     },
+    (
+        FIXED_CLEANING,
+        "fixed separation assembly",
+        "fixed sieve and tray",
+        "sealed debris cover",
+    ),
 )
 FEED = ProvisionCriterion(
     "Feed control",
@@ -121,6 +134,7 @@ FEED = ProvisionCriterion(
         ),
         "Indexed feed wheel": ("indexed detent", "one-pod detent"),
     },
+    (FIXED_FEED, "unmetered feed", "uncontrolled feed", "fixed feed rate"),
 )
 REVIEW_CRITERIA = {item.label.casefold(): item for item in (KERNEL, WASH, FEED)}
 DEFAULT_CRITERIA = ("kernel protection", "cleaning access")
@@ -364,20 +378,6 @@ _FOCUS_WORDS = {
         "flow of pods",
     ),
 }
-_FIXED_FEATURES = {
-    "kernel_protection": (
-        "fixed gap",
-        "fixed roller gap",
-        "fixed clearance",
-        "fixed stop",
-    ),
-    "cleaning_access": (
-        "fixed separation assembly",
-        "fixed sieve and tray",
-        "sealed debris cover",
-    ),
-    "feed_control": ("unmetered feed", "uncontrolled feed", "fixed feed rate"),
-}
 
 
 def _words(text: str) -> str:
@@ -453,7 +453,7 @@ def _described_provision(
             rf"(?:is |was )?(?:missing|absent)\b",
             normalized,
         )
-        if missing or _first_mention(normalized, _FIXED_FEATURES[item.field]) >= 0:
+        if missing or _first_mention(normalized, item.missing_examples) >= 0:
             observed = getattr(DEFAULT_CONCEPT, item.field)
         for evidence in options:
             pos = _first_mention(normalized, (evidence,))
@@ -598,6 +598,39 @@ def _review_directives(words: str) -> tuple[list[str], list[str], list[str]]:
     return [name for _, _, name in sorted(ranked)], excluded, later
 
 
+_EVIDENCE_LABEL = "|".join(re.escape(name) for name in REVIEW_CRITERIA)
+_LABELLED_PROVISION = re.compile(
+    rf"\b({_EVIDENCE_LABEL})[ \t]*:[ \t]*(.*?)(?=;[ \t]*(?:{_EVIDENCE_LABEL})[ \t]*:|$)",
+    re.I | re.M,
+)
+_PANEL_DESCRIPTION = re.compile(
+    r"(?:^|(?<=[.!?;\n]))\s*((?:a|our|the) hinged (?:side )?(?:panel|door|hatch) "
+    r"(?:exposes|opens onto|gives access to) (?:the |both )?[^.!?;\n]*(?:separator|sieve|tray)[^.!?;\n]*[.!?]?)",
+    re.I,
+)
+_EVIDENCE_INPUT = "To record a feature in your own words, put one provision on a line beginning with Kernel protection:, Cleaning access:, or Feed control:."
+
+
+def _written_provisions(prompt: str) -> tuple[str, dict[str, str]]:
+    """Preserve participant descriptions as evidence instead of interpreting them as commands."""
+    notes = {}
+
+    def capture(match: re.Match) -> str:
+        criterion = REVIEW_CRITERIA[match[1].casefold()]
+        value = match[2].strip()
+        if not value:
+            raise ValueError(f"Give a description after {criterion.label}:")
+        notes[criterion.field] = value
+        return " "
+
+    control = _LABELLED_PROVISION.sub(capture, prompt)
+    panel = _PANEL_DESCRIPTION.search(control)
+    if panel:
+        notes.setdefault(WASH.field, panel[1].strip())
+        control = control[: panel.start()] + " " + control[panel.end() :]
+    return control, notes
+
+
 def respond_sheller(
     prompt: str,
     *,
@@ -616,7 +649,11 @@ def respond_sheller(
         )
     else:
         seed = DEFAULT_CONCEPT
-    concept = asdict(_concept_from_text(prompt, seed, propose=role == "propose"))
+    prompt, written = _written_provisions(prompt)
+    concept = {
+        **asdict(_concept_from_text(prompt, seed, propose=role == "propose")),
+        **written,
+    }
     words = _words(prompt)
     mentioned, excluded, later = _review_directives(words)
     prior_criteria = context.get("criteria") or DEFAULT_CRITERIA
@@ -649,7 +686,9 @@ def respond_sheller(
     if unknown:
         scoped = _review_order(mentioned, None) if mentioned else []
         review = (
-            review_provisions(concept, scoped, changes_per_revision=budget)
+            review_provisions(
+                concept, scoped, changes_per_revision=budget, revise_unrecognized=False
+            )
             if scoped
             else {"feedback": "", "revision_goals": []}
         )
@@ -662,13 +701,24 @@ def respond_sheller(
             "available_criteria": list(REVIEW_CRITERIA),
             "concept": concept,
             "criteria": mentioned,
+            "evidence_input": _EVIDENCE_INPUT,
+            "evidence_status": {
+                item.label: item.evidence_status(concept) for item in scoped
+            },
             "changes_per_revision": budget,
         }
     if role == "critic":
+        review = review_provisions(
+            concept, criteria, changes_per_revision=budget, revise_unrecognized=False
+        )
         return {
-            **review_provisions(concept, criteria, changes_per_revision=budget),
+            **review,
+            **({"evidence_input": _EVIDENCE_INPUT} if not review["approved"] else {}),
             "concept": concept,
             "criteria": names,
+            "evidence_status": {
+                item.label: item.evidence_status(concept) for item in criteria
+            },
             "changes_per_revision": budget,
         }
     if role != "propose":
@@ -684,7 +734,10 @@ def respond_sheller(
         goals = context.get("revision_goals", [])
         # Preserve a supplied repair only when it applies to the current mechanisms.
         if goals and concept != asdict(seed):
-            goals = review_provisions(concept, criteria, changes_per_revision=budget)[
-                "revision_goals"
-            ]
-    return apply_revision_goals(concept, criteria, goals)
+            goals = review_provisions(
+                concept,
+                criteria,
+                changes_per_revision=budget,
+                revise_unrecognized=False,
+            )["revision_goals"]
+    return {**apply_revision_goals(concept, criteria, goals), **written}
